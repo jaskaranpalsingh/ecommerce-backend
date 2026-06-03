@@ -1,5 +1,5 @@
 const dns = require("dns");
-dns.setServers(["8.8.8.8", "8.8.4.4"]); // Force Google DNS (bypasses router DNS issue)
+dns.setServers(["8.8.8.8", "8.8.4.4"]);
 
 const express = require("express");
 const mongoose = require("mongoose");
@@ -18,6 +18,8 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Routes
 app.use("/api/products", require("./routes/productRoutes"));
+app.use("/api/auth", require("./routes/authRoutes"));
+app.use("/api/orders", require("./routes/orderRoutes")); // ← ADDED
 
 app.get("/", (req, res) => {
     res.send("API Running");
