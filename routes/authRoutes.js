@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const sendEmail = require("../utils/sendEmail");
 const crypto = require("crypto");
+const { protect } = require("../middleware/authMiddleware");
 
 // Generate JWT
 const generateToken = (id) => {
@@ -174,6 +175,58 @@ router.post("/verify-otp", async (req, res) => {
 
     } catch (error) {
         console.error("VERIFY OTP ERROR:", error.message);
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// GET /api/auth/profile - Fetch user profile details
+router.get("/profile", protect, async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id).select("-password");
+        if (user) {
+            res.json({
+                _id: user._id,
+                name: user.name,
+                email: user.email,
+                isAdmin: user.isAdmin,
+                createdAt: user.createdAt
+            });
+        } else {
+            res.status(404).json({ message: "User not found" });
+        }
+    } catch (error) {
+        console.error("GET PROFILE ERROR:", error.message);
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// PUT /api/auth/profile - Update user profile details
+router.put("/profile", protect, async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+
+        if (user) {
+            user.name = req.body.name || user.name;
+            user.email = req.body.email || user.email;
+
+            if (req.body.password) {
+                user.password = req.body.password;
+            }
+
+            const updatedUser = await user.save();
+
+            res.json({
+                _id: updatedUser._id,
+                name: updatedUser.name,
+                email: updatedUser.email,
+                isAdmin: updatedUser.isAdmin,
+                token: generateToken(updatedUser._id),
+            });
+        } else {
+            res.status(404).json({ message: "User not found" });
+        }
+    } catch (error) {
+        console.error("UPDATE PROFILE ERROR:", error.message);
         res.status(500).json({ message: error.message });
     }
 });

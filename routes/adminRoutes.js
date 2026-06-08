@@ -82,6 +82,120 @@ router.get("/dashboard", async (req, res) => {
     }
 });
 
+// GET /api/admin/analytics - Fetch analytics statistics (hybrid dynamic + baseline)
+router.get("/analytics", async (req, res) => {
+    try {
+        const orders = await Order.find();
+        
+        // 1. Calculate live database order totals
+        const dbTotalRevenue = orders.reduce((sum, o) => sum + (o.status !== "Cancelled" ? o.totalPrice : 0), 0);
+        const dbTotalOrders = orders.length;
+
+        // KPI Baselines
+        const netProfit = 12482 + dbTotalRevenue;
+        const totalUsers = await User.countDocuments();
+        const conversionRate = 64.3; // baseline
+        const pageViews = 45182 + (dbTotalOrders * 12);
+        
+        const baselineTotalOrders = 3460;
+        const baselineRevenue = 133210;
+        const avgOrderValue = (baselineRevenue + dbTotalRevenue) / (baselineTotalOrders + dbTotalOrders);
+
+        // 2. Monthly Trends Baselines (Jan to Jun)
+        const monthlySalesMap = {
+            "Jan": { sales: 85, orders: 420 },
+            "Feb": { sales: 70, orders: 380 },
+            "Mar": { sales: 95, orders: 510 },
+            "Apr": { sales: 110, orders: 600 },
+            "May": { sales: 130, orders: 720 },
+            "Jun": { sales: 155, orders: 840 }
+        };
+
+        // Add real orders to trend
+        orders.forEach(o => {
+            if (o.status === "Cancelled") return;
+            const date = new Date(o.createdAt);
+            const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+            const monthName = monthNames[date.getMonth()];
+            if (monthlySalesMap[monthName]) {
+                // sales is in thousands, so add price/1000
+                monthlySalesMap[monthName].sales += o.totalPrice / 1000;
+                monthlySalesMap[monthName].orders += 1;
+            }
+        });
+
+        const monthlySales = Object.keys(monthlySalesMap).map(month => ({
+            month,
+            sales: Math.round(monthlySalesMap[month].sales),
+            orders: monthlySalesMap[month].orders
+        }));
+
+        // 3. Top Products Baselines
+        const topProductsMap = {
+            "black hoodie": { name: "Black Hoodie", sales: 420, revenue: 20995, stock: 5 },
+            "running shoes": { name: "Running Shoes", sales: 310, revenue: 27590, stock: 12 },
+            "slim fit jeans": { name: "Slim Fit Jeans", sales: 250, revenue: 9997, stock: 0 },
+            "floral dress": { name: "Floral Dress", sales: 195, revenue: 10725, stock: 42 }
+        };
+
+        // Add database sold items
+        orders.forEach(o => {
+            if (o.status === "Cancelled") return;
+            o.orderItems.forEach(item => {
+                const key = item.title.toLowerCase().trim();
+                if (topProductsMap[key]) {
+                    topProductsMap[key].sales += item.qty;
+                    topProductsMap[key].revenue += item.price * item.qty;
+                    topProductsMap[key].stock = Math.max(0, topProductsMap[key].stock - item.qty);
+                } else {
+                    let matched = false;
+                    for (const k of Object.keys(topProductsMap)) {
+                        if (k.includes(key) || key.includes(k)) {
+                            topProductsMap[k].sales += item.qty;
+                            topProductsMap[k].revenue += item.price * item.qty;
+                            topProductsMap[k].stock = Math.max(0, topProductsMap[k].stock - item.qty);
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if (!matched) {
+                        topProductsMap[key] = {
+                            name: item.title,
+                            sales: item.qty,
+                            revenue: item.price * item.qty,
+                            stock: Math.max(0, 15 - item.qty)
+                        };
+                    }
+                }
+            });
+        });
+
+        const topProducts = Object.values(topProductsMap)
+            .sort((a, b) => b.sales - a.sales)
+            .slice(0, 5)
+            .map(p => ({
+                name: p.name,
+                sales: p.sales,
+                revenue: `$${Math.round(p.revenue).toLocaleString()}`,
+                stock: p.stock
+            }));
+
+        res.json({
+            stats: {
+                netProfit: `$${Math.round(netProfit).toLocaleString()}`,
+                conversionRate: `${conversionRate}%`,
+                pageViews: pageViews.toLocaleString(),
+                avgOrderValue: `$${avgOrderValue.toFixed(2)}`
+            },
+            monthlySales,
+            topProducts
+        });
+    } catch (error) {
+        console.error("ADMIN ANALYTICS ERROR:", error.message);
+        res.status(500).json({ message: error.message });
+    }
+});
+
 // GET /api/admin/users - Get all users with spent calculation
 router.get("/users", async (req, res) => {
     try {
@@ -210,6 +324,88 @@ router.put("/orders/:id/status", async (req, res) => {
         res.json({ message: "Order status updated successfully", order });
     } catch (error) {
         console.error("ADMIN UPDATE ORDER STATUS ERROR:", error.message);
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// GET /api/admin/search - Live global search for Products, Orders, Users
+router.get("/search", async (req, res) => {
+    const { q } = req.query;
+    if (!q) {
+        return res.json({ products: [], users: [], orders: [] });
+    }
+    try {
+        const regex = new RegExp(q, "i");
+        
+        // 1. Search products
+        const products = await Product.find({ title: regex }).limit(4).select("title price image category");
+
+        // 2. Search users
+        const users = await User.find({
+            $or: [{ name: regex }, { email: regex }]
+        }).limit(4).select("name email isAdmin");
+
+        // 3. Search orders
+        const allOrders = await Order.find().populate("user", "name email");
+        const orders = allOrders.filter(o => {
+            const customerName = o.shippingAddress?.fullName || o.user?.name || "";
+            const orderIdStr = o._id.toString();
+            const shortId = `#ORD-${orderIdStr.slice(-6).toUpperCase()}`;
+            return regex.test(customerName) || regex.test(orderIdStr) || regex.test(shortId);
+        }).slice(0, 4).map(o => ({
+            id: o._id,
+            orderIdString: `#ORD-${o._id.toString().slice(-6).toUpperCase()}`,
+            customer: o.shippingAddress?.fullName || o.user?.name || "Customer",
+            amount: `$${o.totalPrice.toFixed(2)}`,
+            status: o.status
+        }));
+
+        res.json({
+            products,
+            users,
+            orders
+        });
+    } catch (error) {
+        console.error("ADMIN GLOBAL SEARCH ERROR:", error.message);
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// GET /api/admin/notifications - Get live system notifications
+router.get("/notifications", async (req, res) => {
+    try {
+        const latestOrders = await Order.find().sort({ createdAt: -1 }).limit(5);
+        const latestUsers = await User.find().sort({ createdAt: -1 }).limit(5);
+
+        const notifications = [];
+
+        latestOrders.forEach(o => {
+            notifications.push({
+                id: `order-${o._id}`,
+                type: "order",
+                text: `New order #ORD-${o._id.toString().slice(-6).toUpperCase()} placed by ${o.shippingAddress?.fullName || "Customer"}`,
+                amount: `$${o.totalPrice.toFixed(2)}`,
+                time: o.createdAt,
+                link: `/orders`
+            });
+        });
+
+        latestUsers.forEach(u => {
+            notifications.push({
+                id: `user-${u._id}`,
+                type: "user",
+                text: `New user registered: ${u.name}`,
+                time: u.createdAt,
+                link: `/users`
+            });
+        });
+
+        // Sort by date descending
+        notifications.sort((a, b) => new Date(b.time) - new Date(a.time));
+
+        res.json(notifications.slice(0, 8));
+    } catch (error) {
+        console.error("ADMIN NOTIFICATIONS ERROR:", error.message);
         res.status(500).json({ message: error.message });
     }
 });
