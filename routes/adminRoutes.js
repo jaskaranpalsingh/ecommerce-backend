@@ -3,6 +3,7 @@ const router = express.Router();
 const Order = require("../models/Order");
 const Product = require("../models/Product");
 const User = require("../models/User");
+const Review = require("../models/Review");
 
 // GET /api/admin/dashboard - Fetch dashboard statistics and lists
 router.get("/dashboard", async (req, res) => {
@@ -78,120 +79,6 @@ router.get("/dashboard", async (req, res) => {
 
     } catch (error) {
         console.error("ADMIN DASHBOARD ERROR:", error.message);
-        res.status(500).json({ message: error.message });
-    }
-});
-
-// GET /api/admin/analytics - Fetch analytics statistics (hybrid dynamic + baseline)
-router.get("/analytics", async (req, res) => {
-    try {
-        const orders = await Order.find();
-        
-        // 1. Calculate live database order totals
-        const dbTotalRevenue = orders.reduce((sum, o) => sum + (o.status !== "Cancelled" ? o.totalPrice : 0), 0);
-        const dbTotalOrders = orders.length;
-
-        // KPI Baselines
-        const netProfit = 12482 + dbTotalRevenue;
-        const totalUsers = await User.countDocuments();
-        const conversionRate = 64.3; // baseline
-        const pageViews = 45182 + (dbTotalOrders * 12);
-        
-        const baselineTotalOrders = 3460;
-        const baselineRevenue = 133210;
-        const avgOrderValue = (baselineRevenue + dbTotalRevenue) / (baselineTotalOrders + dbTotalOrders);
-
-        // 2. Monthly Trends Baselines (Jan to Jun)
-        const monthlySalesMap = {
-            "Jan": { sales: 85, orders: 420 },
-            "Feb": { sales: 70, orders: 380 },
-            "Mar": { sales: 95, orders: 510 },
-            "Apr": { sales: 110, orders: 600 },
-            "May": { sales: 130, orders: 720 },
-            "Jun": { sales: 155, orders: 840 }
-        };
-
-        // Add real orders to trend
-        orders.forEach(o => {
-            if (o.status === "Cancelled") return;
-            const date = new Date(o.createdAt);
-            const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            const monthName = monthNames[date.getMonth()];
-            if (monthlySalesMap[monthName]) {
-                // sales is in thousands, so add price/1000
-                monthlySalesMap[monthName].sales += o.totalPrice / 1000;
-                monthlySalesMap[monthName].orders += 1;
-            }
-        });
-
-        const monthlySales = Object.keys(monthlySalesMap).map(month => ({
-            month,
-            sales: Math.round(monthlySalesMap[month].sales),
-            orders: monthlySalesMap[month].orders
-        }));
-
-        // 3. Top Products Baselines
-        const topProductsMap = {
-            "black hoodie": { name: "Black Hoodie", sales: 420, revenue: 20995, stock: 5 },
-            "running shoes": { name: "Running Shoes", sales: 310, revenue: 27590, stock: 12 },
-            "slim fit jeans": { name: "Slim Fit Jeans", sales: 250, revenue: 9997, stock: 0 },
-            "floral dress": { name: "Floral Dress", sales: 195, revenue: 10725, stock: 42 }
-        };
-
-        // Add database sold items
-        orders.forEach(o => {
-            if (o.status === "Cancelled") return;
-            o.orderItems.forEach(item => {
-                const key = item.title.toLowerCase().trim();
-                if (topProductsMap[key]) {
-                    topProductsMap[key].sales += item.qty;
-                    topProductsMap[key].revenue += item.price * item.qty;
-                    topProductsMap[key].stock = Math.max(0, topProductsMap[key].stock - item.qty);
-                } else {
-                    let matched = false;
-                    for (const k of Object.keys(topProductsMap)) {
-                        if (k.includes(key) || key.includes(k)) {
-                            topProductsMap[k].sales += item.qty;
-                            topProductsMap[k].revenue += item.price * item.qty;
-                            topProductsMap[k].stock = Math.max(0, topProductsMap[k].stock - item.qty);
-                            matched = true;
-                            break;
-                        }
-                    }
-                    if (!matched) {
-                        topProductsMap[key] = {
-                            name: item.title,
-                            sales: item.qty,
-                            revenue: item.price * item.qty,
-                            stock: Math.max(0, 15 - item.qty)
-                        };
-                    }
-                }
-            });
-        });
-
-        const topProducts = Object.values(topProductsMap)
-            .sort((a, b) => b.sales - a.sales)
-            .slice(0, 5)
-            .map(p => ({
-                name: p.name,
-                sales: p.sales,
-                revenue: `$${Math.round(p.revenue).toLocaleString()}`,
-                stock: p.stock
-            }));
-
-        res.json({
-            stats: {
-                netProfit: `$${Math.round(netProfit).toLocaleString()}`,
-                conversionRate: `${conversionRate}%`,
-                pageViews: pageViews.toLocaleString(),
-                avgOrderValue: `$${avgOrderValue.toFixed(2)}`
-            },
-            monthlySales,
-            topProducts
-        });
-    } catch (error) {
-        console.error("ADMIN ANALYTICS ERROR:", error.message);
         res.status(500).json({ message: error.message });
     }
 });
@@ -410,5 +297,119 @@ router.get("/notifications", async (req, res) => {
     }
 });
 
-module.exports = router;
+// ========== REVIEW MODERATION ==========
 
+// GET /api/admin/reviews - Fetch all reviews
+router.get("/reviews", async (req, res) => {
+    try {
+        const reviews = await Review.find()
+            .populate("user", "name email")
+            .populate("product", "title")
+            .sort({ createdAt: -1 });
+
+        const mapped = reviews.map((r) => ({
+            id: r._id,
+            author: r.user?.name || "Unknown User",
+            email: r.user?.email || "",
+            rating: r.rating,
+            title: r.title || "",
+            comment: r.comment,
+            product: r.product?.title || "Unknown Product",
+            productId: r.product?._id,
+            date: r.createdAt
+                ? new Date(r.createdAt).toLocaleDateString("en-GB", {
+                      day: "2-digit",
+                      month: "short",
+                      year: "numeric",
+                  })
+                : "N/A",
+            status: r.status,
+        }));
+
+        res.json(mapped);
+    } catch (error) {
+        console.error("ADMIN GET REVIEWS ERROR:", error.message);
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// PUT /api/admin/reviews/:id/approve - Approve a review
+router.put("/reviews/:id/approve", async (req, res) => {
+    try {
+        const review = await Review.findById(req.params.id);
+        if (!review) {
+            return res.status(404).json({ message: "Review not found" });
+        }
+
+        review.status = "Approved";
+        await review.save();
+
+        // Recalculate product rating after approval
+        const stats = await Review.aggregate([
+            { $match: { product: review.product, status: "Approved" } },
+            {
+                $group: {
+                    _id: "$product",
+                    averageRating: { $avg: "$rating" },
+                    numReviews: { $sum: 1 },
+                },
+            },
+        ]);
+
+        if (stats.length > 0) {
+            await Product.findByIdAndUpdate(review.product, {
+                averageRating: Math.round(stats[0].averageRating * 10) / 10,
+                numReviews: stats[0].numReviews,
+            });
+        }
+
+        res.json({ message: "Review approved successfully" });
+    } catch (error) {
+        console.error("ADMIN APPROVE REVIEW ERROR:", error.message);
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// DELETE /api/admin/reviews/:id - Delete a review
+router.delete("/reviews/:id", async (req, res) => {
+    try {
+        const review = await Review.findById(req.params.id);
+        if (!review) {
+            return res.status(404).json({ message: "Review not found" });
+        }
+
+        const productId = review.product;
+        await Review.findByIdAndDelete(req.params.id);
+
+        // Recalculate product rating after deletion
+        const stats = await Review.aggregate([
+            { $match: { product: productId, status: "Approved" } },
+            {
+                $group: {
+                    _id: "$product",
+                    averageRating: { $avg: "$rating" },
+                    numReviews: { $sum: 1 },
+                },
+            },
+        ]);
+
+        if (stats.length > 0) {
+            await Product.findByIdAndUpdate(productId, {
+                averageRating: Math.round(stats[0].averageRating * 10) / 10,
+                numReviews: stats[0].numReviews,
+            });
+        } else {
+            await Product.findByIdAndUpdate(productId, {
+                averageRating: 0,
+                numReviews: 0,
+            });
+        }
+
+        res.json({ message: "Review deleted successfully" });
+    } catch (error) {
+        console.error("ADMIN DELETE REVIEW ERROR:", error.message);
+        res.status(500).json({ message: error.message });
+    }
+});
+
+module.exports = router;
