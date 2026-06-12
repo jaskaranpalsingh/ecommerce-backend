@@ -10,6 +10,7 @@ const userSchema = new mongoose.Schema(
         isBlocked: { type: Boolean, default: false },
         resetOTP: { type: String },
         resetOTPExpire: { type: Date },
+        wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: "Product" }],
     },
     { timestamps: true }
 );
