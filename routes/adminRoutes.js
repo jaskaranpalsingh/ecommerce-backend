@@ -4,6 +4,7 @@ const Order = require("../models/Order");
 const Product = require("../models/Product");
 const User = require("../models/User");
 const Review = require("../models/Review");
+const sendEmail = require("../utils/sendEmail");
 
 // GET /api/admin/dashboard - Fetch dashboard statistics and lists
 router.get("/dashboard", async (req, res) => {
@@ -200,13 +201,80 @@ router.put("/orders/:id/status", async (req, res) => {
             return res.status(400).json({ message: "Invalid status value" });
         }
 
-        const order = await Order.findById(req.params.id);
+        const order = await Order.findById(req.params.id).populate("user");
         if (!order) {
             return res.status(404).json({ message: "Order not found" });
         }
 
+        const oldStatus = order.status;
         order.status = status;
+        
+        // Update isDelivered flag if status changes to Delivered
+        if (status === "Delivered") {
+            order.isDelivered = true;
+        }
+
         await order.save();
+
+        // Send status change email
+        if (oldStatus !== status && order.user && order.user.email) {
+            try {
+                const statusColors = {
+                    Pending: "#d97706",
+                    Processing: "#2563eb",
+                    Shipped: "#7c3aed",
+                    Delivered: "#16a34a",
+                    Cancelled: "#dc2626"
+                };
+                const statusColor = statusColors[status] || "#4b5563";
+
+                const emailHtml = `
+                    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; padding: 30px; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.02);">
+                        <div style="text-align: center; border-bottom: 2px solid #5b21b6; padding-bottom: 20px; margin-bottom: 25px;">
+                            <h1 style="color: #5b21b6; margin: 0; font-size: 28px; font-weight: 800; letter-spacing: 2px;">NURFIA</h1>
+                            <p style="color: #718096; font-size: 14px; margin: 5px 0 0 0;">Premium Apparel Store</p>
+                        </div>
+                        
+                        <div style="margin-bottom: 25px;">
+                            <h2 style="font-size: 20px; color: #1a202c; margin: 0 0 10px 0;">Order Status Updated! 🚚</h2>
+                            <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0 0 15px 0;">Hi ${order.shippingAddress?.fullName || order.user.name},</p>
+                            <p style="color: #4a5568; font-size: 15px; line-height: 1.6; margin: 0;">We want to let you know that your order status has been updated to:</p>
+                            
+                            <div style="background-color: #f7fafc; padding: 15px 20px; border-radius: 8px; margin-top: 15px; border-left: 4px solid ${statusColor};">
+                                <span style="color: #718096; font-size: 13px; display: block;">Order Reference: <strong>#ORD-${order._id.toString().slice(-6).toUpperCase()}</strong></span>
+                                <span style="color: ${statusColor}; font-size: 18px; font-weight: 700; display: block; margin-top: 5px;">${status}</span>
+                            </div>
+                        </div>
+
+                        <h3 style="font-size: 16px; color: #1a202c; border-bottom: 1px solid #edf2f7; padding-bottom: 8px; margin-bottom: 15px; text-transform: uppercase; letter-spacing: 0.5px;">Order Details</h3>
+                        <div style="margin-bottom: 25px; font-size: 14px; color: #4a5568; line-height: 1.6;">
+                            <p style="margin: 3px 0;"><strong>Items:</strong> ${order.orderItems.map(item => `${item.title} (x${item.qty})`).join(", ")}</p>
+                            <p style="margin: 3px 0;"><strong>Total Amount:</strong> $${order.totalPrice.toFixed(2)}</p>
+                        </div>
+
+                        <div style="margin-bottom: 30px; padding: 20px; background-color: #f7fafc; border-radius: 8px; font-size: 14px; border: 1px solid #e2e8f0;">
+                            <h4 style="margin: 0 0 10px 0; color: #1a202c; font-size: 15px; font-weight: 700;">Delivery Address</h4>
+                            <p style="margin: 2px 0; color: #4a5568;"><strong>${order.shippingAddress?.fullName}</strong></p>
+                            <p style="margin: 2px 0; color: #4a5568;">${order.shippingAddress?.address}</p>
+                            <p style="margin: 2px 0; color: #4a5568;">${order.shippingAddress?.city}, ${order.shippingAddress?.state} - ${order.shippingAddress?.pincode}</p>
+                        </div>
+
+                        <div style="text-align: center; margin-top: 30px; font-size: 12px; color: #a0aec0; border-top: 1px solid #edf2f7; padding-top: 20px;">
+                            <p style="margin: 0 0 5px 0;">You can check the real-time tracking timeline of your order anytime in your account dashboard.</p>
+                            <p style="margin: 0;">&copy; 2026 NURFIA Store. All rights reserved.</p>
+                        </div>
+                    </div>
+                `;
+
+                await sendEmail({
+                    to: order.user.email,
+                    subject: `NURFIA - Order Status Updated: ${status} (#ORD-${order._id.toString().slice(-6).toUpperCase()})`,
+                    html: emailHtml
+                });
+            } catch (emailErr) {
+                console.error("Failed to send order status update email:", emailErr.message);
+            }
+        }
 
         res.json({ message: "Order status updated successfully", order });
     } catch (error) {
